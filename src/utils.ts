@@ -92,6 +92,85 @@ export function getInputAsInt(
   return value;
 }
 
+const MillisecondsPerSecond = 1000;
+
+// Compression methods this fork can write and read. The archive name keeps
+// upstream's cache.tgz / cache.tzst suffix, and that suffix is also what tells a
+// restore which decompressor to use, so it identifies how an object was written.
+const ArchiveCompressionMethods: CompressionMethod[] = [
+  CompressionMethod.Gzip,
+  CompressionMethod.ZstdWithoutLong,
+];
+
+/**
+ * Compression method that produced `archiveName`, or undefined when the name
+ * carries neither known archive suffix.
+ */
+export function compressionMethodForArchive(
+  archiveName: string
+): CompressionMethod | undefined {
+  return ArchiveCompressionMethods.find((method) =>
+    archiveName.endsWith(utils.getCacheFileName(method))
+  );
+}
+
+export const CompressionInput = {
+  Auto: "auto",
+  Zstd: "zstd",
+  Gzip: "gzip",
+} as const;
+
+/**
+ * Compression method to write a new archive with, from the `compression` input.
+ *
+ * `auto` (the default) mirrors upstream @actions/cache: zstd when the binary is
+ * on PATH, gzip otherwise. Upstream makes that fallback silently, and
+ * single-threaded gzip turns a multi-GB cache into a long stretch of no output,
+ * so the fallback is reported here instead. Restores resolve the same input but
+ * pass `reportFallback: false`: a restore has nothing to slow down, so warning
+ * there would just repeat the save warning on every job.
+ */
+export async function resolveCompressionMethod(
+  { reportFallback = true }: { reportFallback?: boolean } = {}
+): Promise<CompressionMethod> {
+  const input = (getInput("compression") ?? "").trim().toLowerCase();
+  if (input === CompressionInput.Gzip) {
+    return CompressionMethod.Gzip;
+  }
+
+  let requestedMethod: string = input === "" ? CompressionInput.Auto : input;
+  if (
+    requestedMethod !== CompressionInput.Auto &&
+    requestedMethod !== CompressionInput.Zstd
+  ) {
+    core.warning(
+      `Unknown compression "${input}"; valid values are ${Object.values(
+        CompressionInput
+      ).join(", ")}. Using ${CompressionInput.Auto}.`
+    );
+    requestedMethod = CompressionInput.Auto;
+  }
+
+  // Upstream's probe: it answers Gzip only when `zstd` is missing from PATH.
+  const detected = await utils.getCompressionMethod();
+  if (detected !== CompressionMethod.Gzip) {
+    return detected;
+  }
+
+  if (reportFallback) {
+    if (requestedMethod === CompressionInput.Zstd) {
+      core.warning(
+        `compression: ${CompressionInput.Zstd} was requested, but zstd is not on PATH; saving with gzip instead.`
+      );
+    } else {
+      core.warning(
+        `zstd is not on PATH; saving the cache with single-threaded gzip, which is very slow for multi-GB caches. Install zstd to speed this up, or set compression: ${CompressionInput.Gzip} to silence this warning.`
+      );
+    }
+  }
+  return CompressionMethod.Gzip;
+}
+
 export function formatSize(value?: number, format = "bi") {
   if (!value) return "";
   const [multiple, k, suffix] = (
@@ -126,8 +205,7 @@ export async function findObject(
   mc: minio.Client,
   bucket: string,
   key: string,
-  restoreKeys: string[],
-  compressionMethod: CompressionMethod
+  restoreKeys: string[]
 ): Promise<FindObjectResult> {
   core.debug("Key: " + JSON.stringify(key));
   core.debug("Restore keys: " + JSON.stringify(restoreKeys));
@@ -150,10 +228,13 @@ export async function findObject(
   core.debug(`Didn't find an exact match`);
 
   for (const restoreKey of restoreKeys) {
-    const fn = utils.getCacheFileName(compressionMethod);
     core.debug(`Finding object with prefix: ${restoreKey}`);
     let objects = await listObjects(mc, bucket, restoreKey);
-    objects = objects.filter((o) => o.name?.includes(fn));
+    // Accept objects from either era: a runner without zstd writes cache.tgz, and
+    // the decompressor is picked from the object name after download.
+    objects = objects.filter(
+      (o) => o.name !== undefined && compressionMethodForArchive(o.name) !== undefined
+    );
     core.debug(`Found ${JSON.stringify(objects, null, 2)}`);
     if (objects.length < 1) {
       continue;
@@ -238,7 +319,7 @@ export async function saveCache(standalone: boolean) {
         region: standalone ? getInput("region", "AWS_REGION") : core.getState(State.Region),
       });
 
-      const compressionMethod = await utils.getCompressionMethod();
+      const compressionMethod = await resolveCompressionMethod();
       const cachePaths = await utils.resolvePaths(paths);
       core.debug("Cache Paths:");
       core.debug(`${JSON.stringify(cachePaths)}`);
@@ -249,7 +330,17 @@ export async function saveCache(standalone: boolean) {
 
       core.debug(`Archive Path: ${archivePath}`);
 
+      core.info(`Creating cache archive ${cacheFileName} (compression: ${compressionMethod})`);
+      const archiveStartedAt = Date.now();
       await createTar(archiveFolder, cachePaths, compressionMethod);
+      const archiveSeconds = (
+        (Date.now() - archiveStartedAt) / MillisecondsPerSecond
+      ).toFixed(1);
+      core.info(
+        `Cache archive created in ${archiveSeconds}s: ${cacheFileName}, ${formatSize(
+          utils.getArchiveFileSizeInBytes(archivePath)
+        )} (compression: ${compressionMethod})`
+      );
       if (core.isDebug()) {
         await listTar(archivePath, compressionMethod);
       }

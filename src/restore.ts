@@ -5,12 +5,14 @@ import * as core from "@actions/core";
 import * as path from "path";
 import { State } from "./state";
 import {
+  compressionMethodForArchive,
   findObject,
   formatSize,
   getInputAsArray,
   getInputAsBoolean,
   isGhes,
   newMinio,
+  resolveCompressionMethod,
   setCacheHitOutput,
   setCacheMatchedKeyOutput,
   setCacheSizeOutput,
@@ -49,21 +51,37 @@ async function restoreCache() {
 
       const mc = newMinio();
 
-      const compressionMethod = await utils.getCompressionMethod();
-      const cacheFileName = utils.getCacheFileName(compressionMethod);
-      const archivePath = path.join(
-        await utils.createTempDirectory(),
-        cacheFileName,
-      );
+      // The local compression setting only decides which archive name to prefer
+      // while looking the object up; the object name decides how it is extracted.
+      const preferredCompressionMethod = await resolveCompressionMethod({
+        reportFallback: false,
+      });
+      const archiveFolder = await utils.createTempDirectory();
 
       const { item: obj, matchingKey } = await findObject(
         mc,
         bucket,
         key,
         restoreKeys,
-        compressionMethod,
       );
       core.debug("found cache object");
+
+      // Cached objects may have been written by a runner with a different
+      // compression setup than this one, so trust the object name over the local
+      // environment and stay able to restore older gzip archives.
+      const archiveName = path.posix.basename(obj.name ?? "");
+      const compressionMethod =
+        compressionMethodForArchive(archiveName) ?? preferredCompressionMethod;
+      const archivePath = path.join(
+        archiveFolder,
+        utils.getCacheFileName(compressionMethod),
+      );
+      if (compressionMethod !== preferredCompressionMethod) {
+        core.info(
+          `Cache object ${archiveName} uses ${compressionMethod} compression (local default: ${preferredCompressionMethod}).`,
+        );
+      }
+
       saveMatchedKey(matchingKey);
       const cacheHit = matchingKey === key;
       setCacheHitOutput(cacheHit);

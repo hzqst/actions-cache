@@ -33,6 +33,10 @@ inputs:
   key:
     description: "An explicit key for restoring and saving the cache"
     required: true
+  compression:
+    description: "Compression used when saving the cache archive: auto (zstd when available, gzip otherwise), zstd, or gzip."
+    required: false
+    default: "auto"
   use-fallback:
     description: "Use github actions/cache as fallback"
     required: false

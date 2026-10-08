@@ -36,6 +36,10 @@ inputs:
   restore-keys:
     description: "An ordered list of keys to use for restoring the cache if no cache hit occurred for key"
     required: false
+  compression:
+    description: "Compression used when saving the cache archive: auto (zstd when available, gzip otherwise), zstd, or gzip. Restores pick the decompressor from the cached object name, so this only affects newly saved caches."
+    required: false
+    default: "auto"
   use-fallback:
     description: "Use github actions/cache as fallback"
     required: false
