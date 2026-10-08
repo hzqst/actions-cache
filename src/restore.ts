@@ -1,24 +1,17 @@
 import * as cache from "@actions/cache";
-import * as utils from "@actions/cache/lib/internal/cacheUtils";
-import { extractTar, listTar } from "@actions/cache/lib/internal/tar";
 import * as core from "@actions/core";
-import * as path from "path";
 import { State } from "./state";
 import {
-  compressionMethodForArchive,
-  findObject,
-  formatSize,
+  getInput,
   getInputAsArray,
   getInputAsBoolean,
   isGhes,
-  newMinio,
-  resolveCompressionMethod,
+  restoreFromS3,
+  s3ConfigFromInputs,
+  saveMatchedKey,
   setCacheHitOutput,
   setCacheMatchedKeyOutput,
   setCacheSizeOutput,
-  saveMatchedKey,
-  getInput,
-  withRetry,
 } from "./utils";
 
 process.on("uncaughtException", (e) => core.info("warning: " + e.message));
@@ -32,6 +25,7 @@ async function restoreCache() {
     const restoreKeys = getInputAsArray("restore-keys");
     const lookupOnly = getInputAsBoolean("lookup-only");
 
+    let restoredFromS3 = false;
     try {
       // Inputs are re-evaluted before the post action, so we want to store the original values
       core.saveState(State.PrimaryKey, key);
@@ -49,92 +43,59 @@ async function restoreCache() {
       );
       core.saveState(State.Region, getInput("region", "AWS_REGION"));
 
-      const mc = newMinio();
+      const config = s3ConfigFromInputs();
+      config.bucket = bucket;
 
-      // The local compression setting only decides which archive name to prefer
-      // while looking the object up; the object name decides how it is extracted.
-      const preferredCompressionMethod = await resolveCompressionMethod({
-        reportFallback: false,
-      });
-      const archiveFolder = await utils.createTempDirectory();
-
-      const { item: obj, matchingKey } = await findObject(
-        mc,
-        bucket,
+      const result = await restoreFromS3(config, {
         key,
+        paths,
         restoreKeys,
-      );
-      core.debug("found cache object");
+        lookupOnly,
+        compression: getInput("compression"),
+      });
 
-      // Cached objects may have been written by a runner with a different
-      // compression setup than this one, so trust the object name over the local
-      // environment and stay able to restore older gzip archives.
-      const archiveName = path.posix.basename(obj.name ?? "");
-      const compressionMethod =
-        compressionMethodForArchive(archiveName) ?? preferredCompressionMethod;
-      const archivePath = path.join(
-        archiveFolder,
-        utils.getCacheFileName(compressionMethod),
-      );
-      if (compressionMethod !== preferredCompressionMethod) {
-        core.info(
-          `Cache object ${archiveName} uses ${compressionMethod} compression (local default: ${preferredCompressionMethod}).`,
-        );
-      }
-
-      saveMatchedKey(matchingKey);
-      const cacheHit = matchingKey === key;
-      setCacheHitOutput(cacheHit);
-      setCacheSizeOutput(obj.size);
-      setCacheMatchedKeyOutput(matchingKey);
-      if (lookupOnly) {
-        if (cacheHit && obj.size > 0) {
-          core.info(
-            `Cache Hit. NOT Downloading cache from s3 because lookup-only is set. bucket: ${bucket}, object: ${obj.name}`,
-          );
-        } else {
-          core.info(
-            `Cache Miss or cache size is 0. NOT Downloading cache from s3 because lookup-only is set. bucket: ${bucket}, object: ${obj.name}`,
-          )
-        }
-      } else {
-        core.info(
-          `Downloading cache from s3 to ${archivePath}. bucket: ${bucket}, object: ${obj.name}`,
-        );
-        await withRetry("fGetObject", () => mc.fGetObject(bucket, obj.name!, archivePath));
-
-        if (core.isDebug()) {
-          await listTar(archivePath, compressionMethod);
-        }
-
-        core.info(`Cache Size: ${formatSize(obj.size)} (${obj.size} bytes)`);
-
-        await extractTar(archivePath, compressionMethod);
-        core.info("Cache restored from s3 successfully");
+      if (result !== undefined) {
+        saveMatchedKey(result.matchedKey);
+        setCacheHitOutput(result.exactMatch);
+        setCacheSizeOutput(result.size);
+        setCacheMatchedKeyOutput(result.matchedKey);
+        restoredFromS3 = true;
       }
     } catch (e) {
       core.info("Restore s3 cache failed: " + e.message);
-      setCacheHitOutput(false);
-      setCacheMatchedKeyOutput("");
-      if (useFallback) {
-        if (isGhes()) {
-          core.warning("Cache fallback is not supported on Github Enterpise.");
-        } else {
-          core.info("Restore cache using fallback cache");
-          const fallbackMatchingKey = await cache.restoreCache(
-            paths,
-            key,
-            restoreKeys,
-          );
-          if (fallbackMatchingKey) {
-            setCacheHitOutput(fallbackMatchingKey === key);
-            setCacheMatchedKeyOutput(fallbackMatchingKey);
-            core.info("Fallback cache restored successfully");
-          } else {
-            core.info("Fallback cache restore failed");
-          }
-        }
-      }
+    }
+
+    if (restoredFromS3) {
+      return;
+    }
+
+    // A miss and a broken backend both end up here: the GitHub cache may still
+    // hold a usable entry, so it stays in play when a fallback was requested.
+    setCacheHitOutput(false);
+    setCacheMatchedKeyOutput("");
+
+    if (!useFallback) {
+      core.info(`No cache restored from s3 for key: ${key}`);
+      return;
+    }
+    if (isGhes()) {
+      core.warning("Cache fallback is not supported on Github Enterpise.");
+      return;
+    }
+
+    core.info("Restore cache using fallback cache");
+    const fallbackMatchingKey = await cache.restoreCache(
+      paths,
+      key,
+      restoreKeys,
+    );
+    if (fallbackMatchingKey) {
+      saveMatchedKey(fallbackMatchingKey);
+      setCacheHitOutput(fallbackMatchingKey === key);
+      setCacheMatchedKeyOutput(fallbackMatchingKey);
+      core.info("Fallback cache restored successfully");
+    } else {
+      core.info("Fallback cache restore failed");
     }
   } catch (e) {
     core.setFailed(e.message);

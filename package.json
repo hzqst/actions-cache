@@ -1,9 +1,25 @@
 {
-  "name": "actions-cache",
-  "main": "lib/restoreCache.js",
+  "name": "@hzqst/actions-cache",
+  "main": "lib/s3.js",
+  "types": "lib/s3.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/s3.d.ts",
+      "default": "./lib/s3.js"
+    }
+  },
+  "files": [
+    "lib",
+    "dist",
+    "restore",
+    "save",
+    "action.yml",
+    "README.md"
+  ],
   "license": "MIT",
   "scripts": {
-    "build": "tsc && ncc build -o dist/restore src/restore.ts && ncc build -o dist/save src/save.ts && ncc build -o dist/saveOnly src/saveOnly.ts",
+    "build": "tsc -p tsconfig.lib.json && ncc build -o dist/restore src/restore.ts && ncc build -o dist/save src/save.ts && ncc build -o dist/saveOnly src/saveOnly.ts",
+    "build:lib": "tsc -p tsconfig.lib.json",
     "test": "tsc --noEmit && jest --coverage"
   },
   "dependencies": {

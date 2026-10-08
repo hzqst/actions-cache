@@ -172,6 +172,45 @@ When using this with Amazon S3, the following permissions are necessary:
  - `s3:ListBucketMultipartUploads`
  - `s3:ListMultipartUploadParts`
 
+## Using the S3 cache as a library
+
+The S3 layer is exported as a library, so other actions can cache arbitrary paths
+through the same object layout without going through this action's inputs. The
+`lib/` build output is committed for that reason (npm git dependencies are
+installed without running a build step).
+
+```js
+const { restoreFromS3, saveToS3 } = require("@hzqst/actions-cache");
+
+const config = {
+  endpoint: "minio.example.com", // host only, no scheme
+  port: 9000,
+  useSSL: false,
+  accessKey: process.env.AWS_ACCESS_KEY_ID,
+  secretKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: "us-east-1",
+  bucket: "actions-cache",
+  prefix: "owner/repo", // optional object key namespace
+};
+
+// Returns undefined on a miss; throws when the backend itself fails.
+const result = await restoreFromS3(config, {
+  key: "my-cache-key",
+  paths: ["/home/runner/.cache/uv"],
+});
+if (!result) {
+  // ...populate the path, then:
+  await saveToS3(config, { key: "my-cache-key", paths: ["/home/runner/.cache/uv"] });
+}
+```
+
+Objects are stored as `{prefix}/{key}/{cache.tgz|cache.tzst}`: the archive name
+records which compressor wrote it, so runners with and without `zstd` on `PATH`
+can restore each other's objects. `restoreFromS3` reports the matched key without
+the configured prefix, which is what a caller needs to compare against its own
+primary key. Fallback to the GitHub Actions cache is not part of the library; it
+stays in the action entry points, where the caller can decide the policy.
+
 # Note on release
 
 This project follows semantic versioning. Backward incompatible changes will

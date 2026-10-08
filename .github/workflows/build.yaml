@@ -35,12 +35,14 @@ jobs:
         run: yarn install --pure-lockfile
       - name: Build
         run: yarn build
-      - name: Commit dist/ changes
+      - name: Commit dist/ and lib/ changes
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          git add dist/
+          # lib/ is committed as well: it is what consumers of the S3 library
+          # install, and npm git dependencies are installed without a build step.
+          git add dist/ lib/
           if git diff --cached --quiet; then
-            echo "dist/ is up to date, nothing to commit"
+            echo "dist/ and lib/ are up to date, nothing to commit"
           else
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
