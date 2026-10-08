@@ -136,7 +136,11 @@ export async function findObject(
   const keyMatches = await listObjects(mc, bucket, key);
   core.debug(`Found ${JSON.stringify(keyMatches, null, 2)}`);
   if (keyMatches.length > 0) {
-    const exactMatch = keyMatches.find((obj) => obj.name?.startsWith(key + path.sep));
+    // S3 keys use '/', regardless of the runner OS. Also accept objects saved by
+    // older Windows actions on endpoints that preserve their backslash keys.
+    const exactMatch = keyMatches.find((obj) =>
+      obj.name?.startsWith(key + "/") || obj.name?.startsWith(key + "\\")
+    );
     if (exactMatch) {
       const result = { item: exactMatch, matchingKey: key };
       core.debug(`Found an exact match; using ${JSON.stringify(result)}`);
@@ -250,7 +254,7 @@ export async function saveCache(standalone: boolean) {
         await listTar(archivePath, compressionMethod);
       }
 
-      const object = path.join(key, cacheFileName);
+      const object = path.posix.join(key, cacheFileName);
 
       core.info(`Uploading tar to s3. Bucket: ${bucket}, Object: ${object}`);
       await withRetry("fPutObject", () => mc.fPutObject(bucket, object, archivePath, {}));
